@@ -1,6 +1,6 @@
 /* global TONES, MIRROR, HERO_IDS, CHANT, SENTENCES, speechSynthesis, SpeechSynthesisUtterance */
 (function () {
-  const STORAGE_KEY = "shengqiao-practice-v1";
+  const STORAGE_KEY = "shengqiao-practice-v2";
   const SHADOW_MS = 2800;
   const PREFER = {
     "zh-HK": ["sinji", "善怡"],
@@ -137,13 +137,14 @@
     },
   };
 
+  let book = { current: "slower", scenes: {} };
   let progress = loadProgress();
   let view = progress.finished ? 6 : progress.step;
   let heroId = HERO_IDS[0];
   let kindFilter = "all";
   let toneFilter = 0;
   let chantIndex = 0;
-  let sceneId = "slower";
+  let sceneId = progress.sceneId;
   let armedMeaning = null;
   let heardChips = new Set();
   let lastFeedback = "";
@@ -631,8 +632,9 @@
     });
   }
 
-  function freshProgress() {
+  function freshProgress(sceneId) {
     return {
+      sceneId: sceneId || "slower",
       step: 0,
       heard: false,
       shadowed: false,
@@ -644,28 +646,54 @@
     };
   }
 
+  function hydrate(sceneId, raw) {
+    const base = freshProgress(sceneId);
+    if (!raw || typeof raw !== "object") return base;
+    const next = Object.assign(base, raw);
+    next.sceneId = sceneId;
+    next.misses = raw.misses || {};
+    next.matched = Array.isArray(raw.matched) ? raw.matched : [];
+    next.helped = Array.isArray(raw.helped) ? raw.helped : [];
+    next.step = Math.min(6, Math.max(0, next.step | 0));
+    return next;
+  }
+
   function loadProgress() {
-    const base = freshProgress();
     try {
       const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
-      if (!raw || typeof raw !== "object") return base;
-      const next = Object.assign(base, raw);
-      next.misses = raw.misses || {};
-      next.matched = Array.isArray(raw.matched) ? raw.matched : [];
-      next.helped = Array.isArray(raw.helped) ? raw.helped : [];
-      next.step = Math.min(6, Math.max(0, next.step | 0));
-      return next;
-    } catch (err) {
-      return base;
-    }
+      if (raw && raw.scenes) book = raw;
+    } catch (err) { /* ignore */ }
+    const id = book.current || "slower";
+    return hydrate(id, book.scenes[id]);
   }
 
   function save() {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(progress)); } catch (err) { /* ignore */ }
+    book.current = progress.sceneId;
+    book.scenes[progress.sceneId] = progress;
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(book)); } catch (err) { /* ignore */ }
+  }
+
+  function openScene(id, scroll) {
+    if (progress.sceneId !== id) {
+      book.scenes[progress.sceneId] = progress;
+      progress = hydrate(id, book.scenes[id]);
+      view = progress.finished ? 6 : progress.step;
+      armedMeaning = null;
+      heardChips = new Set();
+      lastFeedback = "";
+      save();
+    }
+    sceneId = id;
+    renderTransfer();
+    renderPractice();
+    if (scroll) {
+      const target = document.getElementById("practice");
+      if (target) target.scrollIntoView({ behavior: "smooth" });
+    }
   }
 
   function practiceSentence() {
-    return SENTENCES[0];
+    return SENTENCES.find((item) => item.id === progress.sceneId) || SENTENCES[0];
   }
 
   function yueLang() {
@@ -678,6 +706,15 @@
 
   function renderPractice() {
     const root = document.getElementById("practiceRoot");
+    const picker = el("div", { class: "tabs", role: "tablist", "aria-label": "选择一句" });
+    SENTENCES.forEach((scene) => {
+      picker.append(el("button", {
+        class: "tab",
+        role: "tab",
+        "aria-selected": scene.id === progress.sceneId ? "true" : "false",
+        onClick() { openScene(scene.id, false); },
+      }, [scene.tab]));
+    });
     const nav = el("nav", { class: "steplist", "aria-label": "练习步骤" });
     STEPS.forEach((step, index) => {
       const done = index < progress.step || progress.finished;
@@ -694,7 +731,7 @@
       nav.append(button);
     });
     const panel = view >= 6 ? renderDone() : renderStep(STEPS[view]);
-    root.replaceChildren(el("div", { class: "practice" }, [nav, panel]));
+    root.replaceChildren(picker, el("div", { class: "practice" }, [nav, panel]));
     const title = document.getElementById("panelTitle");
     if (title && document.activeElement && document.activeElement.classList.contains("stepbtn")) {
       title.focus();
@@ -738,7 +775,7 @@
   function renderListen() {
     const sentence = yueLang();
     const hint = el("p", { class: "feedback", "aria-live": "polite" }, [
-      progress.heard ? "你听过这句。它是一句客气的请求。可以再听，也可以看意思。" : "这句是你没听清时可以拿来用的。先听声音。",
+      progress.heard ? "你听过这句。" + practiceSentence().cue + "还可以再听，也可以看意思。" : "先听声音。" + practiceSentence().cue,
     ]);
     const count = el("p", { class: "fine" }, [""]);
     let plays = 0;
@@ -756,7 +793,7 @@
       save();
       next.hidden = false;
       hint.textContent = ok
-        ? "听起来像在请对方做一件事。还可以再听一遍。"
+        ? practiceSentence().cue + "还可以再听一遍。"
         : "粤拼录音没有播出来。请联网后再听。你可以先看意思。";
     });
     return panelShell(STEPS[0], [
@@ -794,7 +831,7 @@
           onClick(event) { withPlaying(event.currentTarget, (gen) => bus.playJyutping(yuePhrase(yueLang()), 0.82, gen)); },
         }, [playIcon(), "再听粤语"]),
       ]),
-      el("p", { class: "fine" }, ["这是一句请求：请对方说慢一点。"]),
+      el("p", { class: "fine" }, [practiceSentence().why]),
       el("button", { class: "btn btn--solid", onClick: advance }, ["去跟读"]),
     ]);
   }
@@ -1023,7 +1060,7 @@
         el("button", {
           class: "btn",
           onClick() {
-            progress = freshProgress();
+            progress = freshProgress(progress.sceneId);
             view = 0;
             armedMeaning = null;
             heardChips = new Set();
@@ -1127,7 +1164,13 @@
       el("h3", {}, [scene.title]),
       el("p", { class: "lede" }, [scene.why]),
       el("p", { class: "gloss" }, [scene.gloss]),
-      el("div", { class: "inline-actions" }, [allBtn]),
+      el("div", { class: "inline-actions" }, [
+        allBtn,
+        el("button", {
+          class: "btn",
+          onClick() { openScene(scene.id, true); },
+        }, ["拿这句去练习"]),
+      ]),
       status,
       cols,
     ]));
@@ -1182,10 +1225,44 @@
     sections.forEach((section) => observer.observe(section));
   }
 
+  function renderSoundShelf(rootId, items, play) {
+    const root = document.getElementById(rootId);
+    if (!root) return;
+    const grid = el("div", { class: rootId === "bitRoot" || rootId === "jaBitRoot" ? "bitgrid" : "pairgrid" });
+    items.forEach((item) => {
+      if (item.a) {
+        grid.append(el("article", { class: "pair" }, [
+          el("h3", {}, [item.title]),
+          el("p", { class: "fine" }, [item.note]),
+          el("div", { class: "inline-actions" }, [
+            el("button", { class: "btn btn--small", onClick(event) { withPlaying(event.currentTarget, (gen) => play(item.a, gen)); } }, [playIcon(), item.a.gloss]),
+            el("button", { class: "btn btn--small", onClick(event) { withPlaying(event.currentTarget, (gen) => play(item.b, gen)); } }, [playIcon(), item.b.gloss]),
+          ]),
+          el("p", {}, [jyutEl(item.a.jyut), " · ", jyutEl(item.b.jyut)]),
+        ]));
+      } else {
+        grid.append(el("article", { class: "bit" }, [
+          el("h3", { lang: item.jyut ? "yue" : "ja" }, [item.text]),
+          item.jyut ? jyutEl(item.jyut) : el("p", { class: "read" }, [item.read]),
+          el("p", {}, [item.gloss]),
+          el("p", { class: "fine" }, [item.note]),
+          el("button", {
+            class: "btn btn--small",
+            onClick(event) { withPlaying(event.currentTarget, (gen) => play(item, gen)); },
+          }, [playIcon(), "听"]),
+        ]));
+      }
+    });
+    root.replaceChildren(grid);
+  }
+
   function init() {
     decorateJyut(document);
     renderHero();
     renderMirror();
+    renderSoundShelf("pairRoot", TONE_PAIRS, (item, gen) => bus.playJyutping(item.jyut, 0.8, gen));
+    renderSoundShelf("bitRoot", BITS, (item, gen) => bus.playJyutping(item.jyut, 0.8, gen));
+    renderSoundShelf("jaBitRoot", JA_BITS, (item, gen) => bus.speak(item.text, "ja-JP", 0.86, gen));
     renderChant();
     renderPractice();
     renderTransfer();
